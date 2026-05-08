@@ -56,7 +56,11 @@ app.post('/merge', async function (req, res) {
   // 如果已经存在该文件，就没必要合并了
   // 完整的文件路径名
   const filePath = path.resolve(UPLOAD_DIR, fileHash + extractExt(fileName))
+  const chunkDir = path.resolve(UPLOAD_DIR, fileHash)
   if (fse.existsSync(filePath)) {
+    if (fse.existsSync(chunkDir)) {
+      await fse.remove(chunkDir)
+    }
     res.status(200).json({
       ok: true,
       msg: '合并成功'
@@ -64,7 +68,6 @@ app.post('/merge', async function (req, res) {
     return
   }
   // 如果不存在该文件，才去合并
-  const chunkDir = path.resolve(UPLOAD_DIR, fileHash)
   if (!fse.existsSync(chunkDir)) {
     res.status(401).json({
       ok: false,
@@ -75,15 +78,16 @@ app.post('/merge', async function (req, res) {
   const chunkPaths = await fse.readdir(chunkDir)
   console.log(chunkPaths)
   chunkPaths.sort((a, b) => a.split('-')[1] - b.split('-')[1])
-  const list = chunkPaths.map(async (chunkName, index) => {
-    return new Promise(resolve => {
+  const list = chunkPaths.map((chunkName, index) => {
+    return new Promise((resolve, reject) => {
       const chunkPath = path.resolve(chunkDir, chunkName)
       const readStream = fse.createReadStream(chunkPath)
       const writeStream = fse.createWriteStream(filePath, {
-        start: index * size,
-        end: (index + 1) * size
+        start: index * size
       })
-      readStream.on('end', async () => {
+      readStream.on('error', reject)
+      writeStream.on('error', reject)
+      writeStream.on('finish', async () => {
         await fse.unlink(chunkPath)
         resolve()
       })
