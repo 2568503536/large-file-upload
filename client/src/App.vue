@@ -5,6 +5,9 @@ import SparkMD5 from 'spark-md5'
 const fileHash = ref('')
 const fileMD5 = ref('')
 const fileName = ref('')
+const fileSize = ref(0)
+const totalChunks = ref(0)
+const waitingChunks = ref(0)
 const uploadStatus = ref('请选择文件')
 const uploadProgress = ref(0)
 const hashProgress = ref(0)
@@ -24,6 +27,25 @@ let fullMD5Resolve = null
 let fullMD5Reject = null
 let activeControllers = []
 let shouldStop = false
+
+const formatFileSize = size => {
+  if (!size) {
+    return '-'
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = size
+  let unitIndex = 0
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex++
+  }
+
+  return `${value.toFixed(value >= 100 ? 0 : 2)} ${units[unitIndex]}`
+}
+
+const progressText = value => `${value}%`
 
 const createChunks = file => {
   const chunks = []
@@ -212,6 +234,7 @@ const uploadChunks = async chunks => {
       cursor++
       await uploadChunk(chunk)
       finished++
+      waitingChunks.value = Math.max(chunks.length - cursor, 0)
       uploadProgress.value = Math.round((finished / currentChunks.length) * 100)
     }
   }
@@ -220,6 +243,7 @@ const uploadChunks = async chunks => {
 
   if (networkPaused || isPaused.value || shouldStop) {
     pendingChunks = chunks.slice(cursor)
+    waitingChunks.value = pendingChunks.length
     return false
   }
 
@@ -236,7 +260,10 @@ const startUpload = async file => {
 
   currentFile = file
   fileName.value = file.name
+  fileSize.value = file.size
   currentChunks = createChunks(file)
+  totalChunks.value = currentChunks.length
+  waitingChunks.value = currentChunks.length
   fileHash.value = await calculateFingerprint(file, currentChunks)
   uploadStatus.value = '文件指纹已生成，正在后台计算完整 MD5...'
   calculateFullMD5(file)
@@ -245,11 +272,13 @@ const startUpload = async file => {
   if (!res.data.shouldUpload) {
     uploadStatus.value = '文件已存在，无需重复上传'
     uploadProgress.value = 100
+    waitingChunks.value = 0
     isUploading.value = false
     return
   }
 
   pendingChunks = getPendingChunks(currentChunks, res.data.uploadedRanges || [])
+  waitingChunks.value = pendingChunks.length
   uploadStatus.value = `开始上传，待上传分片 ${pendingChunks.length} 个`
 
   const completed = await uploadChunks(pendingChunks)
@@ -275,6 +304,7 @@ const resumeUpload = async () => {
 
   const res = await verify()
   pendingChunks = getPendingChunks(currentChunks, res.data.uploadedRanges || [])
+  waitingChunks.value = pendingChunks.length
   uploadStatus.value = `继续上传，待上传分片 ${pendingChunks.length} 个`
 
   const completed = await uploadChunks(pendingChunks)
@@ -311,6 +341,9 @@ const stopUpload = () => {
   fileHash.value = ''
   fileMD5.value = ''
   fileName.value = ''
+  fileSize.value = 0
+  totalChunks.value = 0
+  waitingChunks.value = 0
   uploadStatus.value = '已终止上传，请重新选择文件'
 }
 
@@ -352,19 +385,86 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div>
-    <h1>大文件上传</h1>
-    <input type="file" @change="handleFileChange" />
-    <div>
-      <button :disabled="!isUploading" @click="pauseUpload">暂停</button>
-      <button :disabled="!canResume" @click="resumeUpload">继续</button>
-      <button :disabled="!isUploading && !canResume" @click="stopUpload">终止</button>
-    </div>
-    <p>状态：{{ uploadStatus }}</p>
-    <p>文件名：{{ fileName || '-' }}</p>
-    <p>文件指纹：{{ fileHash || '-' }}</p>
-    <p>上传进度：{{ uploadProgress }}%</p>
-    <p>完整 MD5 计算进度：{{ hashProgress }}%</p>
-    <p>完整 MD5：{{ fileMD5 || '-' }}</p>
-  </div>
+  <main class="upload-page">
+    <section class="upload-card">
+      <div class="hero-section">
+        <div>
+          <p class="eyebrow">Large File Upload</p>
+          <h1>大文件分片上传</h1>
+          <p class="subtitle">快速指纹校验、区间断点续传、后台 MD5 校验与可控并发上传。</p>
+        </div>
+        <span class="status-pill" :class="{ active: isUploading, paused: canResume && !isUploading }">
+          {{ isUploading ? '上传中' : canResume ? '可续传' : '就绪' }}
+        </span>
+      </div>
+
+      <label class="upload-dropzone">
+        <input type="file" @change="handleFileChange" />
+        <span class="upload-icon">↑</span>
+        <strong>选择文件开始上传</strong>
+        <small>支持超大文件，上传过程中可暂停、继续或终止</small>
+      </label>
+
+      <div class="action-row">
+        <button :disabled="!isUploading" @click="pauseUpload">暂停</button>
+        <button class="primary" :disabled="!canResume" @click="resumeUpload">继续</button>
+        <button class="danger" :disabled="!isUploading && !canResume" @click="stopUpload">终止</button>
+      </div>
+
+      <div class="status-panel">
+        <div class="status-header">
+          <span>当前状态</span>
+          <strong>{{ uploadStatus }}</strong>
+        </div>
+        <div class="progress-block">
+          <div class="progress-title">
+            <span>上传进度</span>
+            <strong>{{ progressText(uploadProgress) }}</strong>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar upload" :style="{ width: progressText(uploadProgress) }"></div>
+          </div>
+        </div>
+        <div class="progress-block">
+          <div class="progress-title">
+            <span>完整 MD5 计算</span>
+            <strong>{{ progressText(hashProgress) }}</strong>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar hash" :style="{ width: progressText(hashProgress) }"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="info-grid">
+        <div class="info-item">
+          <span>文件名</span>
+          <strong>{{ fileName || '-' }}</strong>
+        </div>
+        <div class="info-item">
+          <span>文件大小</span>
+          <strong>{{ formatFileSize(fileSize) }}</strong>
+        </div>
+        <div class="info-item">
+          <span>分片总数</span>
+          <strong>{{ totalChunks || '-' }}</strong>
+        </div>
+        <div class="info-item">
+          <span>待上传分片</span>
+          <strong>{{ waitingChunks || 0 }}</strong>
+        </div>
+      </div>
+
+      <div class="hash-panel">
+        <div>
+          <span>快速文件指纹</span>
+          <code>{{ fileHash || '-' }}</code>
+        </div>
+        <div>
+          <span>完整文件 MD5</span>
+          <code>{{ fileMD5 || '后台计算中...' }}</code>
+        </div>
+      </div>
+    </section>
+  </main>
 </template>
