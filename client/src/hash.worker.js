@@ -1,12 +1,29 @@
 import SparkMD5 from 'spark-md5'
 
+let stopped = false
+
 self.onmessage = async event => {
-  console.log('收到消息:', event)
-  const { file, chunkSize } = event.data
+  const { type, file, chunkSize } = event.data
+
+  if (type === 'stop') {
+    stopped = true
+    return
+  }
+
+  if (type !== 'calculate') {
+    return
+  }
+
+  stopped = false
   const totalChunks = Math.ceil(file.size / chunkSize)
   const spark = new SparkMD5.ArrayBuffer()
 
   for (let index = 0; index < totalChunks; index++) {
+    if (stopped) {
+      self.postMessage({ type: 'stopped' })
+      return
+    }
+
     const start = index * chunkSize
     const end = Math.min(file.size, start + chunkSize)
     const buffer = await file.slice(start, end).arrayBuffer()
